@@ -1,0 +1,534 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// 1. AUTHENTICATION, USERS & OTP
+// ==========================================
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  INVENTORY_MANAGER
+  ORDER_MANAGER
+  CONTENT_MANAGER
+  CUSTOMER
+}
+
+model User {
+  id           String        @id @default(uuid())
+  phone        String        @unique // Primary login identifier (ADR-003)
+  email        String?       @unique // Optional for customers, required for admin
+  passwordHash String?       // Used by admin accounts
+  role         UserRole      @default(CUSTOMER)
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deletedAt    DateTime?
+
+  customer     Customer?
+  adminProfile AdminProfile?
+  auditLogs    AuditLog[]
+
+  @@map("users")
+}
+
+model OtpVerification {
+  id         String   @id @default(uuid())
+  phone      String
+  otpCode    String
+  expiresAt  DateTime
+  isVerified Boolean  @default(false)
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([phone, isVerified])
+  @@map("otp_verifications")
+}
+
+model AdminProfile {
+  id       String @id @default(uuid())
+  userId   String @unique
+  fullName String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("admin_profiles")
+}
+
+// ==========================================
+// 2. CUSTOMER DOMAIN (B2C & B2B)
+// ==========================================
+
+model Customer {
+  id            String     @id @default(uuid())
+  userId        String     @unique
+  fullName      String
+  companyName   String?    // B2B Legal Entity Name (ADR-002)
+  gstin         String?    // Indian 15-character GSTIN (ADR-002)
+  isB2BVerified Boolean    @default(false)
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  addresses     Address[]
+  orders        Order[]
+  cart          Cart?
+  wishlist      Wishlist?
+  reviews       Review[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@map("customers")
+}
+
+model Address {
+  id            String   @id @default(uuid())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  recipientName String
+  phone         String
+  addressLine1  String
+  addressLine2  String?
+  landmark      String?
+  city          String
+  state         String
+  pincode       String
+  isDefault     Boolean  @default(false)
+  type          String   @default("HOME") // HOME, WORK, WAREHOUSE
+
+  shippingOrders Order[] @relation("OrderShippingAddress")
+  billingOrders  Order[] @relation("OrderBillingAddress")
+
+  @@map("addresses")
+}
+
+// ==========================================
+// 3. CATALOG & MULTI-ATTRIBUTE VARIANTS
+// ==========================================
+
+model Category {
+  id          String     @id @default(uuid())
+  name        String
+  slug        String     @unique
+  description String?
+  imageUrl    String?
+  parentId    String?
+  parent      Category?  @relation("SubCategories", fields: [parentId], references: [id])
+  children    Category[] @relation("SubCategories")
+  hsnCode     String?    @default("8525")
+  gstRate     Decimal    @default(18.0) @db.Decimal(5, 2)
+  isActive    Boolean    @default(true)
+  products    Product[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@map("categories")
+}
+
+model Brand {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  logoUrl     String?
+  description String?
+  isActive    Boolean   @default(true)
+  products    Product[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("brands")
+}
+
+model Product {
+  id             String           @id @default(uuid())
+  name           String
+  slug           String           @unique
+  brandId        String
+  brand          Brand            @relation(fields: [brandId], references: [id])
+  categoryId     String
+  category       Category         @relation(fields: [categoryId], references: [id])
+  shortDesc      String?
+  description    String           @db.Text
+  modelNumber    String?
+  isActive       Boolean          @default(true)
+  isFeatured     Boolean          @default(false)
+  isCodAllowed   Boolean          @default(true) // Selective COD Control (ADR-004)
+  specifications Json? // Flexible key-value spec attributes
+  images         ProductImage[]
+  variants       ProductVariant[]
+  reviews        Review[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  deletedAt      DateTime?
+
+  @@index([brandId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+model ProductImage {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  altText   String?
+  sortOrder Int     @default(0)
+
+  @@map("product_images")
+}
+
+model ProductVariant {
+  id         String   @id @default(uuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name       String // e.g. "4MP / 3.6mm / Bullet / ColorVu"
+  attributes Json // ADR-005 Multi-Attribute JSONB map
+  skuId      String   @unique
+  sku        Sku      @relation(fields: [skuId], references: [id])
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("product_variants")
+}
+
+model Sku {
+  id           String              @id @default(uuid())
+  code         String              @unique // e.g. "CPP-B01-4MP-CV"
+  barcode      String?             @unique
+  mrp          Decimal             @db.Decimal(12, 2)
+  sellingPrice Decimal             @db.Decimal(12, 2)
+  weightGrams  Int                 @default(500)
+  dimensionsCm Json? // {"length": 15, "width": 10, "height": 10}
+  variant      ProductVariant?
+  inventory    Inventory?
+  cartItems    CartItem[]
+  orderItems   OrderItem[]
+  bundleItems  BundleItem[]
+  movements    InventoryMovement[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  @@map("skus")
+}
+
+// ==========================================
+// 4. INVENTORY & STOCK AUDIT
+// ==========================================
+
+model Inventory {
+  id                String   @id @default(uuid())
+  skuId             String   @unique
+  sku               Sku      @relation(fields: [skuId], references: [id], onDelete: Cascade)
+  currentStock      Int      @default(0) // Physical units on shelf
+  reservedStock     Int      @default(0) // Locked in active checkouts/pending orders
+  lowStockThreshold Int      @default(5)
+  updatedAt         DateTime @updatedAt
+
+  @@map("inventory")
+}
+
+enum MovementReason {
+  PURCHASE_RECEIPT
+  ORDER_RESERVED
+  ORDER_DISPATCHED
+  ORDER_CANCELLED_RESTOCK
+  RETURN_RESTOCK
+  MANUAL_ADJUSTMENT
+  DAMAGED_WRITE_OFF
+}
+
+model InventoryMovement {
+  id          String         @id @default(uuid())
+  skuId       String
+  sku         Sku            @relation(fields: [skuId], references: [id])
+  quantity    Int // Positive for additions, negative for reductions
+  reason      MovementReason
+  referenceId String? // OrderId, PO number, or ReturnId
+  notes       String?
+  createdById String?
+  createdAt   DateTime       @default(now())
+
+  @@map("inventory_movements")
+}
+
+// ==========================================
+// 5. CCTV KIT / BUNDLE BUILDER (ADR-006)
+// ==========================================
+
+model Bundle {
+  id          String       @id @default(uuid())
+  name        String // e.g. "Complete 4-Camera HD Surveillance Kit"
+  slug        String       @unique
+  description String?
+  discountPct Decimal      @default(5.0) @db.Decimal(5, 2)
+  isActive    Boolean      @default(true)
+  items       BundleItem[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@map("bundles")
+}
+
+model BundleItem {
+  id         String  @id @default(uuid())
+  bundleId   String
+  bundle     Bundle  @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  skuId      String
+  sku        Sku     @relation(fields: [skuId], references: [id])
+  quantity   Int     @default(1)
+  isOptional Boolean @default(false)
+
+  @@map("bundle_items")
+}
+
+// ==========================================
+// 6. CART, WISHLIST & CHECKOUT
+// ==========================================
+
+model Cart {
+  id         String     @id @default(uuid())
+  customerId String     @unique
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items      CartItem[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@map("carts")
+}
+
+model CartItem {
+  id        String   @id @default(uuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  skuId     String
+  sku       Sku      @relation(fields: [skuId], references: [id])
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, skuId])
+  @@map("cart_items")
+}
+
+model Wishlist {
+  id         String         @id @default(uuid())
+  customerId String         @unique
+  customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items      WishlistItem[]
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@map("wishlists")
+}
+
+model WishlistItem {
+  id         String   @id @default(uuid())
+  wishlistId String
+  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  productId  String
+  createdAt  DateTime @default(now())
+
+  @@unique([wishlistId, productId])
+  @@map("wishlist_items")
+}
+
+// ==========================================
+// 7. ORDERS, PAYMENTS & FULFILLMENT
+// ==========================================
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  COD_PENDING
+  PAID
+  CONFIRMED
+  PROCESSING
+  PACKED
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  RETURN_REQUESTED
+  RETURNED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  RAZORPAY
+  CASH_ON_DELIVERY
+}
+
+model Order {
+  id                String               @id @default(uuid())
+  orderNumber       String               @unique // e.g. "ORD-2026-0001"
+  customerId        String
+  customer          Customer             @relation(fields: [customerId], references: [id])
+  status            OrderStatus          @default(PENDING_PAYMENT)
+  paymentMethod     PaymentMethod        @default(RAZORPAY)
+  subtotal          Decimal              @db.Decimal(12, 2)
+  discountAmount    Decimal              @default(0) @db.Decimal(12, 2)
+  gstAmount         Decimal              @db.Decimal(12, 2)
+  shippingAmount    Decimal              @default(0) @db.Decimal(12, 2)
+  totalAmount       Decimal              @db.Decimal(12, 2)
+  isB2B             Boolean              @default(false)
+  gstin             String?
+  companyName       String?
+  shippingAddressId String
+  shippingAddress   Address              @relation("OrderShippingAddress", fields: [shippingAddressId], references: [id])
+  billingAddressId  String
+  billingAddress    Address              @relation("OrderBillingAddress", fields: [billingAddressId], references: [id])
+  items             OrderItem[]
+  statusHistory     OrderStatusHistory[]
+  payments          Payment[]
+  shipments         Shipment[]
+  returns           OrderReturn[]
+  invoiceUrl        String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id            String   @id @default(uuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  skuId         String
+  sku           Sku      @relation(fields: [skuId], references: [id])
+  productName   String
+  variantName   String
+  skuCode       String
+  quantity      Int
+  unitPrice     Decimal  @db.Decimal(12, 2)
+  taxRate       Decimal  @db.Decimal(5, 2)
+  taxAmount     Decimal  @db.Decimal(12, 2)
+  totalPrice    Decimal  @db.Decimal(12, 2)
+  serialNumbers String[] // Scanned hardware serial numbers
+
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  comment   String?
+  changedBy String?
+  createdAt DateTime    @default(now())
+
+  @@map("order_status_history")
+}
+
+enum PaymentStatus {
+  INITIATED
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id               String         @id @default(uuid())
+  orderId          String
+  order            Order          @relation(fields: [orderId], references: [id])
+  gateway          String         @default("RAZORPAY")
+  gatewayOrderId   String?        @unique
+  gatewayPaymentId String?        @unique
+  amount           Decimal        @db.Decimal(12, 2)
+  currency         String         @default("INR")
+  status           PaymentStatus  @default(INITIATED)
+  events           PaymentEvent[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@map("payments")
+}
+
+model PaymentEvent {
+  id        String   @id @default(uuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id])
+  eventId   String   @unique // Deduplication key
+  eventType String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@map("payment_events")
+}
+
+model Shipment {
+  id          String          @id @default(uuid())
+  orderId     String
+  order       Order           @relation(fields: [orderId], references: [id])
+  carrier     String          @default("SHIPROCKET")
+  shipmentId  String?         @unique
+  awbNumber   String?         @unique
+  trackingUrl String?
+  labelUrl    String?
+  status      String          @default("MANIFESTED")
+  events      ShipmentEvent[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@map("shipments")
+}
+
+model ShipmentEvent {
+  id         String   @id @default(uuid())
+  shipmentId String
+  shipment   Shipment @relation(fields: [shipmentId], references: [id])
+  eventId    String   @unique
+  status     String
+  location   String?
+  timestamp  DateTime
+  payload    Json
+  createdAt  DateTime @default(now())
+
+  @@map("shipment_events")
+}
+
+model OrderReturn {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  reason    String
+  status    String   @default("REQUESTED")
+  isRma     Boolean  @default(false) // Distinction between retail return & manufacturer RMA
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("order_returns")
+}
+
+model Review {
+  id         String   @id @default(uuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+  rating     Int      @default(5)
+  title      String?
+  comment    String?
+  isVerified Boolean  @default(false)
+  isApproved Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@map("reviews")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  entity    String
+  entityId  String
+  details   Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
